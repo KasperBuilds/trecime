@@ -16,4 +16,5 @@ sleep 10
 
 # Run the python monitor in infinite loop mode
 echo "Starting Auronzo Monitor..."
+export CAMOFOX_URL="http://localhost:${PORT:-9377}"
 python3 auronzo_monitor.py
