@@ -1,0 +1,52 @@
+name: Auronzo monitor
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub may delay scheduled runs under load,
+    # so effective cadence is more like every 10-20 min in practice.
+    - cron: '*/10 * * * *'
+  # Lets you click "Run workflow" manually from the Actions tab for testing.
+  workflow_dispatch:
+
+# Prevent overlapping runs if one sweep is slow.
+concurrency:
+  group: auronzo-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needs write to commit auronzo_state.json back
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install deps
+        run: pip install requests beautifulsoup4 python-dotenv
+
+      - name: Run one sweep
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python auronzo_monitor.py --once
+
+      - name: Persist state file
+        run: |
+          git config user.name "auronzo-monitor[bot]"
+          git config user.email "auronzo-monitor@users.noreply.github.com"
+          git add auronzo_state.json
+          # Only commit if there are actual changes
+          if ! git diff --quiet --cached; then
+            git commit -m "state: $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
