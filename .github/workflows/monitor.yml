@@ -1,51 +1,56 @@
-name: Auronzo monitor
+name: Auronzo Monitor
 
 on:
   schedule:
-    # Every 10 minutes. GitHub may delay scheduled runs under load,
-    # so effective cadence is more like every 10-20 min in practice.
-    - cron: '*/10 * * * *'
-  # Lets you click "Run workflow" manually from the Actions tab for testing.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
-# Prevent overlapping runs if one sweep is slow.
-concurrency:
-  group: auronzo-monitor
-  cancel-in-progress: false
-
 jobs:
-  check:
+  monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needs write to commit auronzo_state.json back
-
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Node
+        uses: actions/setup-node@v3
         with:
-          python-version: '3.12'
+          node-version: 18
 
-      - name: Install deps
-        run: pip install requests beautifulsoup4 python-dotenv
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
 
-      - name: Run one sweep
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Camofox-Browser Server
+        working-directory: ./camofox-browser
+        run: npm install
+
+      - name: Inject Camoufox Profile
+        run: |
+          mkdir -p ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c04a2088ab8992d6a6380f0b3199af0a4a
+          echo '${{ secrets.CAMOFOX_STORAGE_STATE }}' > ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c04a2088ab8992d6a6380f0b3199af0a4a/storage-state.json
+
+      - name: Start Camofox-Browser Server
+        working-directory: ./camofox-browser
+        run: |
+          unset CAMOUFOX_EXECUTABLE
+          npm start &
+          sleep 10
+
+      - name: Run Monitor Sweep
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python auronzo_monitor.py --once
+        run: python3 auronzo_monitor.py --once
 
-      - name: Persist state file
+      - name: Commit state
         run: |
-          git config user.name "auronzo-monitor[bot]"
-          git config user.email "auronzo-monitor@users.noreply.github.com"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
           git add auronzo_state.json
-          # Only commit if there are actual changes
-          if ! git diff --quiet --cached; then
-            git commit -m "state: $(date -u +%Y-%m-%dT%H:%MZ)"
-            git push
-          else
-            echo "No state changes to commit."
-          fi
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update state" && git push)
