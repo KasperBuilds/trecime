@@ -32,8 +32,8 @@ jobs:
 
       - name: Inject Camoufox Profile
         run: |
-          mkdir -p ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c04a2088ab8992d6a6380f0b3199af0a4a
-          echo '${{ secrets.CAMOFOX_STORAGE_STATE }}' > ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c04a2088ab8992d6a6380f0b3199af0a4a/storage-state.json
+          mkdir -p ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c0
+          echo '${{ secrets.CAMOFOX_STORAGE_STATE }}' > ~/.camofox/profiles/585dd6332347ac93c97e0e379a14f8c0/storage-state.json
 
       - name: Start Camofox-Browser Server
         working-directory: ./camofox-browser
