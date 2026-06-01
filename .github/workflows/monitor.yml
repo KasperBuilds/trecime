@@ -18,6 +18,16 @@ jobs:
         with:
           node-version: 18
 
+      - name: Cache dependencies and Camoufox binary
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache
+            camofox-browser/node_modules
+          key: ${{ runner.os }}-camoufox-${{ hashFiles('camofox-browser/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-camoufox-
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
