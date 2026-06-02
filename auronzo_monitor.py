@@ -16,8 +16,9 @@ import os
 import re
 import json
 import time
+import random
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -37,14 +38,24 @@ SCHEDULER_URL = "https://pass.auronzo.info/Frontoffice/Abbonamenti/GetDurateSche
 PERMIT_TYPE_ID = 1
 SECTOR_ID = 10  # PARCHEGGIO AUTO/MOTO
 
-OUTER_INTERVAL_SECONDS = 15 * 60   # full sweep every 15 min
+# Sweep cadence: sleep a random interval in [MIN, MAX] between sweeps so polling
+# looks natural rather than clockwork. Override via env vars on Railway.
+OUTER_INTERVAL_MIN_SECONDS = int(os.getenv("OUTER_INTERVAL_MIN_SECONDS", str(1 * 60)))   # 1 min
+OUTER_INTERVAL_MAX_SECONDS = int(os.getenv("OUTER_INTERVAL_MAX_SECONDS", str(5 * 60)))   # 5 min
 PER_DATE_SLEEP_SECONDS = 2.5       # gap between per-date requests; be polite
 MAX_FAILURES_BEFORE_ALERT = 3      # consecutive sweep failures before alerting
 
 STATE_FILE = "auronzo_state.json"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# One or more chat IDs, comma- or whitespace-separated, so multiple people get
+# alerts, e.g. TELEGRAM_CHAT_ID="111111111,222222222".
+TELEGRAM_CHAT_IDS = [c.strip() for c in re.split(r"[,\s]+", os.getenv("TELEGRAM_CHAT_ID", "")) if c.strip()]
+
+# Daily liveness heartbeat: once per day, at/after this UTC hour, send a status
+# message even when nothing changed (so you know the monitor is still alive).
+# Set DAILY_HEARTBEAT_HOUR to -1 to disable.
+DAILY_HEARTBEAT_HOUR = int(os.getenv("DAILY_HEARTBEAT_HOUR", "9"))
 
 CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://localhost:9377")
 CAMOFOX_USER_ID = "auronzo-monitor"
@@ -65,21 +76,22 @@ log = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 def send_telegram(message: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         log.info("[TELEGRAM NOT CONFIGURED] %s", message)
         return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "disable_web_page_preview": True,
-            },
-            timeout=15,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Telegram send failed: %r", exc)
+    for chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Telegram send failed for %s: %r", chat_id, exc)
 
 
 # ----------------------------------------------------------------------------
@@ -88,17 +100,60 @@ def send_telegram(message: str) -> None:
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
-        return {"last_max_date": None, "day_slots": {}, "failures": 0}
+        return {
+            "last_max_date": None,
+            "day_slots": {},
+            "failures": 0,
+            "last_heartbeat_date": None,
+            "alerts_today": 0,
+        }
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         state = json.load(f)
     state.setdefault("day_slots", {})
     state.setdefault("failures", 0)
+    state.setdefault("last_heartbeat_date", None)
+    state.setdefault("alerts_today", 0)
     return state
 
 
 def save_state(state: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
+
+def maybe_send_heartbeat(state: dict) -> None:
+    """Send a once-per-day liveness message, even when nothing changed.
+
+    Fires on the first sweep at/after DAILY_HEARTBEAT_HOUR (UTC) each calendar
+    day. Reports how many alerts went out since the last heartbeat, or "no
+    change" if there were none.
+    """
+    if DAILY_HEARTBEAT_HOUR < 0:
+        return
+
+    now = datetime.utcnow()
+    today = now.date().isoformat()
+    if now.hour < DAILY_HEARTBEAT_HOUR:
+        return
+    if state.get("last_heartbeat_date") == today:
+        return
+
+    alerts_today = state.get("alerts_today", 0)
+    max_date = state.get("last_max_date", "?")
+    if alerts_today:
+        body = f"📢 {alerts_today} availability alert(s) sent since the last update."
+    else:
+        body = "😴 No change — no new dates or slots."
+
+    send_telegram(
+        f"✅ Auronzo monitor alive — {now.strftime('%a %d %b %Y %H:%M UTC')}\n"
+        f"{body}\n"
+        f"Calendar max date: {max_date}"
+    )
+
+    state["last_heartbeat_date"] = today
+    state["alerts_today"] = 0
+    save_state(state)
 
 
 # ----------------------------------------------------------------------------
@@ -499,6 +554,7 @@ def run_sweep(state: dict) -> None:
                 f"New max:      {max_d.isoformat()}\n\n"
                 f"{PAGE_URL}"
             )
+            state["alerts_today"] = state.get("alerts_today", 0) + 1
         state["last_max_date"] = max_d.isoformat()
 
         # Drop snapshots for dates that are no longer in range, to keep state tidy
@@ -525,6 +581,7 @@ def run_sweep(state: dict) -> None:
 
         if alerts:
             send_telegram("\n\n".join(alerts) + f"\n\nBook: {PAGE_URL}")
+            state["alerts_today"] = state.get("alerts_today", 0) + len(alerts)
 
         save_state(state)
 
@@ -546,6 +603,7 @@ def main() -> None:
         try:
             run_sweep(state)
             state["failures"] = 0
+            maybe_send_heartbeat(state)
         except Exception as exc:  # noqa: BLE001
             log.exception("Sweep failed: %r", exc)
             state["failures"] = state.get("failures", 0) + 1
@@ -562,9 +620,9 @@ def main() -> None:
 
     while True:
         one_iteration()
-        log.info("Sleeping %ds", OUTER_INTERVAL_SECONDS)
-        time.sleep(OUTER_INTERVAL_SECONDS)
-
+        sleep_s = random.randint(OUTER_INTERVAL_MIN_SECONDS, OUTER_INTERVAL_MAX_SECONDS)
+        log.info("Sleeping %ds (random %d-%ds)", sleep_s, OUTER_INTERVAL_MIN_SECONDS, OUTER_INTERVAL_MAX_SECONDS)
+        time.sleep(sleep_s)
 
 if __name__ == "__main__":
     main()
