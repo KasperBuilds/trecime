@@ -2,43 +2,41 @@ name: Auronzo Monitor
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: auronzo-monitor
+  cancel-in-progress: true
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 18
-
-      - name: Cache dependencies and Camoufox binary
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache
-            camofox-browser/node_modules
-          key: ${{ runner.os }}-camoufox-${{ hashFiles('camofox-browser/package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-camoufox-
+          cache: npm
+          cache-dependency-path: camofox-browser/package-lock.json
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install Python deps
         run: pip install -r requirements.txt
 
       - name: Install Camofox-Browser Server
         working-directory: ./camofox-browser
-        run: npm install
+        run: npm ci
 
       - name: Inject Camoufox Profile
         run: |
@@ -63,4 +61,4 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add auronzo_state.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update state" && git push)
+          git diff --cached --quiet || (git commit -m "Update state" && git push)
