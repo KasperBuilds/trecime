@@ -232,6 +232,16 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
 
         try:
             page.goto(TICKETS_URL, timeout=45000)
+            
+            # Dismiss the cookie banner which blocks the API fetch
+            try:
+                accept_btn = page.locator("button:has-text('Aceptar todas')")
+                accept_btn.wait_for(state="visible", timeout=5000)
+                accept_btn.click()
+                log.info("Clicked 'Aceptar todas' cookie button.")
+            except PlaywrightTimeoutError:
+                pass
+                
             # Wait up to 30 seconds for the API call to complete
             for _ in range(30):
                 if matches_data is not None:
