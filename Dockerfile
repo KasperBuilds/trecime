@@ -9,6 +9,7 @@ COPY . /app
 
 # Install Python dependencies
 RUN pip install -r requirements.txt
+RUN playwright install firefox
 
 # Install Node dependencies for the server
 RUN cd camofox-browser && npm install
