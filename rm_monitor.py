@@ -212,9 +212,12 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
 
     def on_response(response):
         nonlocal matches_data
+        if "rm-ms-match" in response.url:
+            log.info("RM API Response: %s %s", response.status, response.url)
         if "/rm-ms-match-prd/api/v1/matches" in response.url and response.request.method == "GET":
             try:
                 matches_data = response.json()
+                log.info("Successfully intercepted matches JSON.")
             except Exception as e:
                 log.warning("Failed to parse intercepted JSON: %r", e)
 
@@ -228,12 +231,26 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
         page.on("response", on_response)
 
         try:
-            page.goto(TICKETS_URL, timeout=30000)
-            # Wait up to 10 seconds for the API call to complete
-            for _ in range(10):
+            page.goto(TICKETS_URL, timeout=45000)
+            # Wait up to 30 seconds for the API call to complete
+            for _ in range(30):
                 if matches_data is not None:
                     break
                 page.wait_for_timeout(1000)
+            
+            if matches_data is None:
+                log.warning("matches_data is still None. Taking debug screenshot...")
+                try:
+                    page.screenshot(path="debug_rm.png")
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                        data={"chat_id": TELEGRAM_CHAT_ID, "caption": "RM Debug Screenshot (failed to intercept)"},
+                        files={"photo": open("debug_rm.png", "rb")},
+                        timeout=15
+                    )
+                except Exception as e:
+                    log.error("Screenshot error: %s", e)
+
         except Exception as e:
             log.warning("Playwright navigation error: %r", e)
         finally:
