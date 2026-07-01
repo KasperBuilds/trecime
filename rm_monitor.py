@@ -291,6 +291,7 @@ JS_FETCH_MATCHES = """
 (async () => {
     try {
         const resp = await fetch("%s", {
+            credentials: "include",
             headers: {
                 "Ocp-Apim-Subscription-Key": "%s",
                 "Accept": "application/json"
@@ -404,6 +405,10 @@ def main():
     else:
         log.error("Camofox server not available after 60s")
         return
+
+    # Offset start to avoid colliding with auronzo_monitor on boot
+    log.info("Offsetting start by 30s to let Auronzo monitor run first...")
+    time.sleep(30)
 
     try:
         while running:
