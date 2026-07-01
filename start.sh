@@ -22,4 +22,4 @@ export CAMOFOX_URL="http://localhost:${PORT:-9377}"
 python3 auronzo_monitor.py &
 
 # Real Madrid monitor in foreground (keeps container alive)
-python3 rm_monitor.py
+xvfb-run -a python3 rm_monitor.py
