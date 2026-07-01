@@ -294,10 +294,11 @@ JS_FETCH_MATCHES = """
             credentials: "include",
             headers: {
                 "Ocp-Apim-Subscription-Key": "%s",
-                "Accept": "application/json"
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
             }
         });
-        if (!resp.ok) return JSON.stringify({error: resp.status});
+        if (!resp.ok) return JSON.stringify({error: "HTTP " + resp.status});
         const data = await resp.json();
         return JSON.stringify(data);
     } catch (e) {
@@ -315,10 +316,10 @@ def fetch_matches(session: CamofoxSession) -> list[dict]:
     # Navigate to the tickets page first to get Akamai cookies
     if session.tab_id is None:
         session.open_tab(TICKETS_URL)
-        time.sleep(5)  # let Akamai sensor JS run
+        time.sleep(8)  # let Akamai sensor JS run
     else:
         session.navigate(TICKETS_URL)
-        time.sleep(5)
+        time.sleep(8)
 
     # Now fetch the API from inside the browser
     raw = session.execute_js(JS_FETCH_MATCHES)
@@ -330,11 +331,11 @@ def fetch_matches(session: CamofoxSession) -> list[dict]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         log.warning("Failed to parse fetch result: %.200s", raw)
-        return []
+        return None
 
     if "error" in data:
         log.warning("Fetch returned error: %s", data["error"])
-        return []
+        return None
 
     return parse_matches(data)
 
@@ -415,22 +416,22 @@ def main():
             try:
                 matches = fetch_matches(session)
             except Exception as exc:
-                matches = []
+                matches = None
                 log.error("fetch_matches failed: %r", exc, exc_info=True)
 
-            if not matches:
+            if matches is None:
                 consecutive_failures += 1
                 backoff = min(
                     BACKOFF_BASE * (BACKOFF_MULTIPLIER ** (consecutive_failures - 1)),
                     BACKOFF_MAX,
                 )
                 log.warning(
-                    "No matches found (failure #%d). Backing off %.0fs.",
+                    "Fetch failed (failure #%d). Backing off %.0fs.",
                     consecutive_failures, backoff,
                 )
-                if consecutive_failures >= FAILURE_ALERT_THRESHOLD:
+                if consecutive_failures == FAILURE_ALERT_THRESHOLD:
                     send_telegram(
-                        f"⚠️ RM Monitor: {consecutive_failures} consecutive failures.\n"
+                        f"⚠️ RM Monitor: {consecutive_failures} consecutive fetch failures.\n"
                         f"Possibly blocked by Akamai or site changed."
                     )
                 # Close session to reset cookies
