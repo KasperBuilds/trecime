@@ -288,24 +288,16 @@ def parse_matches(api_data) -> list[dict]:
 # ============================================================================
 
 JS_FETCH_MATCHES = """
-(async () => {
+(() => {
     try {
-        const resp = await fetch("%s", {
-            credentials: "include",
-            headers: {
-                "Ocp-Apim-Subscription-Key": "%s",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
-            }
-        });
-        if (!resp.ok) return JSON.stringify({error: "HTTP " + resp.status});
-        const data = await resp.json();
-        return JSON.stringify(data);
+        const cards = Array.from(document.querySelectorAll('article, [class*="match"]'));
+        const texts = cards.map(c => c.innerText.replace(/\\n/g, ' ')).filter(t => t.length > 20);
+        return JSON.stringify({ dom_cards: texts });
     } catch (e) {
         return JSON.stringify({error: e.message});
     }
 })()
-""" % (MATCHES_API, API_KEY)
+"""
 
 
 def fetch_matches(session: CamofoxSession) -> list[dict]:
@@ -329,6 +321,9 @@ def fetch_matches(session: CamofoxSession) -> list[dict]:
 
     try:
         data = json.loads(raw)
+        if "dom_cards" in data:
+            log.info("DOM MATCH CARDS: %s", json.dumps(data["dom_cards"][:10], ensure_ascii=False))
+            return []
     except json.JSONDecodeError:
         log.warning("Failed to parse fetch result: %.200s", raw)
         return None
