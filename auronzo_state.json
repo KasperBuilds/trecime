@@ -538,7 +538,7 @@
       "Dalle 23:00": 15
     }
   },
-  "failures": 3,
+  "failures": 4,
   "booking_status": null,
   "booking_status_detail": null,
   "last_heartbeat_date": "2026-06-30",
