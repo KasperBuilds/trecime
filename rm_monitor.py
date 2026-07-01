@@ -64,6 +64,9 @@ BACKOFF_MAX = 300
 BACKOFF_MULTIPLIER = 2
 FAILURE_ALERT_THRESHOLD = 5
 
+# Heartbeat — send a status summary to Telegram every N hours
+HEARTBEAT_INTERVAL_HOURS = 6
+
 # ============================================================================
 # Logging
 # ============================================================================
@@ -379,6 +382,8 @@ def main():
     state = load_state()
     consecutive_failures = 0
     running = True
+    last_heartbeat = time.time()
+    total_polls = 0
 
     def shutdown(sig, frame):
         nonlocal running
@@ -443,6 +448,23 @@ def main():
                 send_telegram(a)
 
             save_state(state)
+            total_polls += 1
+
+            # Periodic heartbeat
+            hours_since = (time.time() - last_heartbeat) / 3600
+            if hours_since >= HEARTBEAT_INTERVAL_HOURS:
+                avail_list = [m for m in matches if m["available"]]
+                hb = (
+                    f"💓 RM Monitor heartbeat\n"
+                    f"⏱️ Uptime: {hours_since:.1f}h | Polls: {total_polls}\n"
+                    f"📊 {len(matches)} matches tracked, {len(avail_list)} available"
+                )
+                if avail_list:
+                    hb += "\n" + "\n".join(
+                        f"  ✅ {m['opponent']} ({m['date'][:10]})" for m in avail_list[:5]
+                    )
+                send_telegram(hb)
+                last_heartbeat = time.time()
 
             # Jittered sleep
             jitter = random.uniform(JITTER_MIN_SECONDS, JITTER_MAX_SECONDS)
