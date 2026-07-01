@@ -249,6 +249,14 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
                 page.wait_for_timeout(1000)
             
             if matches_data is None:
+                # Check if the UI explicitly says there are no tickets
+                try:
+                    if page.locator("text='No hay entradas'").is_visible(timeout=2000):
+                        log.info("Page explicitly states 'No hay entradas'. Returning 0 matches.")
+                        return []
+                except Exception:
+                    pass
+
                 log.warning("matches_data is still None. Taking debug screenshot...")
                 try:
                     page.screenshot(path="debug_rm.png")
