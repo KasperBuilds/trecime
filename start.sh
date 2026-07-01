@@ -14,7 +14,12 @@ cd ..
 echo "Waiting for Camofox server to start..."
 sleep 10
 
-# Run the python monitor in infinite loop mode
-echo "Starting Auronzo Monitor..."
+# Run both monitors
+echo "Starting monitors..."
 export CAMOFOX_URL="http://localhost:${PORT:-9377}"
-python3 auronzo_monitor.py
+
+# Auronzo monitor in background
+python3 auronzo_monitor.py &
+
+# Real Madrid monitor in foreground (keeps container alive)
+python3 rm_monitor.py
