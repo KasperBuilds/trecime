@@ -5,12 +5,13 @@ Real Madrid Ticket Availability Monitor
 Watches https://www.realmadrid.com/es-ES/entradas for availability changes
 and sends Telegram alerts when matches flip from unavailable to available.
 
-Uses the Camofox browser server (same instance as auronzo_monitor) to load
-the page in a real browser, bypassing Akamai Bot Manager legitimately.
-The matches API data is captured by executing a fetch() inside the browser
-tab after the page has loaded (so Akamai cookies are already set).
+Uses Playwright with a headful Firefox browser (running via Xvfb on Railway)
+to load the page normally and intercept the native matches API response.
+This completely bypasses Akamai Bot Manager because the real site's JavaScript
+generates all the correct telemetry and cookies.
 
-Designed to run alongside auronzo_monitor.py on Railway.
+To save memory on Railway (which has only 500MB RAM), it opens the browser,
+intercepts the API, and completely closes the browser every poll cycle.
 """
 
 import os
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ============================================================================
 # Config
@@ -31,10 +33,6 @@ import requests
 
 # Matches to watch — filter by opponent name substring and/or date substring.
 # Empty list = watch ALL matches.
-# Examples:
-#   {"opponent": "Barcelona"}
-#   {"date": "2026-09"}
-#   {"opponent": "Atlético", "date": "2026-10"}
 WATCH_LIST: list[dict] = []
 
 # Polling — slow and jittered to be polite
@@ -42,18 +40,12 @@ POLL_INTERVAL_SECONDS = 120       # base interval
 JITTER_MIN_SECONDS = 15
 JITTER_MAX_SECONDS = 45
 
-# Telegram (reuses the same env vars as auronzo_monitor)
+# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Camofox browser server (shared with auronzo_monitor)
-CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://localhost:9377")
-CAMOFOX_USER_ID = "rm-monitor"
-
 # Real Madrid
 TICKETS_URL = "https://www.realmadrid.com/es-ES/entradas"
-MATCHES_API = "https://api-narm.realmadrid.com/rm-ms-match-prd/api/v1/matches"
-API_KEY = "d48dd6e08e6c4ba086ba161047afb976"
 
 # State
 STATE_FILE = Path(__file__).parent / "rm_monitor_state.json"
@@ -64,7 +56,7 @@ BACKOFF_MAX = 300
 BACKOFF_MULTIPLIER = 2
 FAILURE_ALERT_THRESHOLD = 5
 
-# Heartbeat — send a status summary to Telegram every N hours
+# Heartbeat
 HEARTBEAT_INTERVAL_HOURS = 6
 
 # ============================================================================
@@ -77,10 +69,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("rm_monitor")
-
-# ============================================================================
-# Telegram
-# ============================================================================
 
 def send_telegram(message: str) -> None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -118,75 +106,6 @@ def save_state(state: dict) -> None:
         json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-# ============================================================================
-# Camofox browser session (reuses the same pattern as auronzo_monitor)
-# ============================================================================
-
-class CamofoxSession:
-    def __init__(self):
-        self.base_url = CAMOFOX_URL.rstrip("/")
-        self.user_id = CAMOFOX_USER_ID
-        self.tab_id: Optional[str] = None
-        self._http = requests.Session()
-        self._http.headers.update({"Content-Type": "application/json"})
-
-    def health_check(self) -> bool:
-        try:
-            r = self._http.get(f"{self.base_url}/health", timeout=5)
-            return r.json().get("ok", False)
-        except Exception:
-            return False
-
-    def open_tab(self, url: str) -> str:
-        r = self._http.post(
-            f"{self.base_url}/tabs",
-            json={"userId": self.user_id, "sessionKey": "rm-monitor", "url": url},
-            timeout=60,
-        )
-        r.raise_for_status()
-        self.tab_id = r.json()["tabId"]
-        log.info("Opened tab %s at %s", self.tab_id, url)
-        return self.tab_id
-
-    def execute_js(self, script: str) -> str:
-        if not self.tab_id:
-            raise RuntimeError("No tab open")
-        r = self._http.post(
-            f"{self.base_url}/tabs/{self.tab_id}/evaluate",
-            json={
-                "userId": self.user_id,
-                "sessionKey": "rm-monitor",
-                "expression": script,
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        return r.json().get("result", "")
-
-    def navigate(self, url: str) -> None:
-        if not self.tab_id:
-            raise RuntimeError("No tab open")
-        r = self._http.post(
-            f"{self.base_url}/tabs/{self.tab_id}/navigate",
-            json={"url": url},
-            timeout=60,
-        )
-        r.raise_for_status()
-
-    def close_session(self) -> None:
-        try:
-            self._http.delete(
-                f"{self.base_url}/sessions/{self.user_id}", timeout=10
-            )
-            log.info("Closed session")
-        except Exception as exc:
-            log.warning("Failed to close session: %r", exc)
-        self.tab_id = None
-
-# ============================================================================
-# Match filtering
-# ============================================================================
-
 def match_passes_filter(match_info: dict) -> bool:
     if not WATCH_LIST:
         return True
@@ -219,7 +138,6 @@ def parse_matches(api_data) -> list[dict]:
         if not mid:
             continue
 
-        # Opponent
         opponent = ""
         for key in ("awayTeam", "visitorTeam"):
             if key in item and isinstance(item[key], dict):
@@ -227,17 +145,14 @@ def parse_matches(api_data) -> list[dict]:
                 break
         opponent = opponent or item.get("title") or ""
 
-        # Date
         match_date = item.get("date") or item.get("matchDate") or item.get("startDate") or ""
 
-        # Competition
         competition = ""
         if isinstance(item.get("competition"), dict):
             competition = item["competition"].get("name", "")
         elif item.get("competition"):
             competition = str(item["competition"])
 
-        # Availability
         available = False
         detail = "unknown"
 
@@ -259,7 +174,6 @@ def parse_matches(api_data) -> list[dict]:
             available = bool(item["isAvailable"])
             detail = "available" if available else "not available"
 
-        # Price
         price_parts = []
         for pk in ("fromPrice", "fromPriceVIP", "fromPriceGeneral"):
             if item.get(pk):
@@ -284,55 +198,51 @@ def parse_matches(api_data) -> list[dict]:
     return matches
 
 # ============================================================================
-# Fetch matches via browser (bypasses Akamai)
+# Fetch matches via Playwright
 # ============================================================================
 
-JS_FETCH_MATCHES = """
-(() => {
-    try {
-        const cards = Array.from(document.querySelectorAll('article, [class*="match"]'));
-        const texts = cards.map(c => c.innerText.replace(/\\n/g, ' ')).filter(t => t.length > 20);
-        return JSON.stringify({ dom_cards: texts });
-    } catch (e) {
-        return JSON.stringify({error: e.message});
-    }
-})()
-"""
-
-
-def fetch_matches(session: CamofoxSession) -> list[dict]:
+def fetch_matches_with_playwright() -> Optional[list[dict]]:
     """
-    Load the RM tickets page in the browser (warms Akamai cookies),
-    then fetch the matches API from inside the browser context.
+    Launch a local headful Firefox via Playwright.
+    Navigate to the page, intercept the native matches API call,
+    extract the JSON, and close the browser.
+    Returns: list of matches, or None on network/interception error.
     """
-    # Navigate to the tickets page first to get Akamai cookies
-    if session.tab_id is None:
-        session.open_tab(TICKETS_URL)
-        time.sleep(8)  # let Akamai sensor JS run
-    else:
-        session.navigate(TICKETS_URL)
-        time.sleep(8)
+    matches_data = None
 
-    # Now fetch the API from inside the browser
-    raw = session.execute_js(JS_FETCH_MATCHES)
-    if not raw:
-        log.warning("Empty JS result from fetch")
-        return []
+    def on_response(response):
+        nonlocal matches_data
+        if "/rm-ms-match-prd/api/v1/matches" in response.url and response.request.method == "GET":
+            try:
+                matches_data = response.json()
+            except Exception as e:
+                log.warning("Failed to parse intercepted JSON: %r", e)
 
-    try:
-        data = json.loads(raw)
-        if "dom_cards" in data:
-            log.info("DOM MATCH CARDS: %s", json.dumps(data["dom_cards"][:10], ensure_ascii=False))
-            return []
-    except json.JSONDecodeError:
-        log.warning("Failed to parse fetch result: %.200s", raw)
-        return None
+    with sync_playwright() as p:
+        # headless=False is REQUIRED for Akamai, but it runs fine in Railway because of Xvfb
+        browser = p.firefox.launch(headless=False)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0"
+        )
+        page = context.new_page()
+        page.on("response", on_response)
 
-    if "error" in data:
-        log.warning("Fetch returned error: %s", data["error"])
-        return None
+        try:
+            page.goto(TICKETS_URL, timeout=30000)
+            # Wait up to 10 seconds for the API call to complete
+            for _ in range(10):
+                if matches_data is not None:
+                    break
+                page.wait_for_timeout(1000)
+        except Exception as e:
+            log.warning("Playwright navigation error: %r", e)
+        finally:
+            browser.close()
 
-    return parse_matches(data)
+    if matches_data is None:
+        return None  # Failed to intercept or load
+    
+    return parse_matches(matches_data)
 
 # ============================================================================
 # Transition detection
@@ -390,26 +300,14 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    session = CamofoxSession()
-
-    # Wait for the shared Camofox server to be ready
-    for attempt in range(30):
-        if session.health_check():
-            break
-        log.info("Waiting for Camofox server... (%d/30)", attempt + 1)
-        time.sleep(2)
-    else:
-        log.error("Camofox server not available after 60s")
-        return
-
     # Offset start to avoid colliding with auronzo_monitor on boot
-    log.info("Offsetting start by 30s to let Auronzo monitor run first...")
+    log.info("Offsetting start by 30s to let Auronzo monitor boot first...")
     time.sleep(30)
 
     try:
         while running:
             try:
-                matches = fetch_matches(session)
+                matches = fetch_matches_with_playwright()
             except Exception as exc:
                 matches = None
                 log.error("fetch_matches failed: %r", exc, exc_info=True)
@@ -429,8 +327,6 @@ def main():
                         f"⚠️ RM Monitor: {consecutive_failures} consecutive fetch failures.\n"
                         f"Possibly blocked by Akamai or site changed."
                     )
-                # Close session to reset cookies
-                session.close_session()
                 time.sleep(backoff)
                 continue
 
@@ -478,9 +374,7 @@ def main():
 
     finally:
         save_state(state)
-        session.close_session()
         log.info("Monitor stopped.")
-
 
 if __name__ == "__main__":
     main()
