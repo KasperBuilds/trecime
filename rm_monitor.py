@@ -212,14 +212,19 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
 
     def on_response(response):
         nonlocal matches_data
-        if "rm-ms-match" in response.url:
-            log.info("RM API Response: %s %s", response.status, response.url)
-        if "/rm-ms-match-prd/api/v1/matches" in response.url and response.request.method == "GET":
-            try:
-                matches_data = response.json()
-                log.info("Successfully intercepted matches JSON.")
-            except Exception as e:
-                log.warning("Failed to parse intercepted JSON: %r", e)
+        
+        if response.request.resource_type in ("fetch", "xhr"):
+            log.info("XHR/Fetch: %s %s", response.status, response.url)
+            
+            if "match" in response.url.lower() and response.request.method == "GET":
+                try:
+                    data = response.json()
+                    # Check if it looks like the matches data we expect
+                    if isinstance(data, list) or "matches" in data or "data" in data or "items" in data:
+                        matches_data = data
+                        log.info("Successfully intercepted matches JSON from %s", response.url)
+                except Exception:
+                    pass
 
     with sync_playwright() as p:
         # headless=False is REQUIRED for Akamai, but it runs fine in Railway because of Xvfb
@@ -249,9 +254,9 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
                 page.wait_for_timeout(1000)
             
             if matches_data is None:
-                # Check if the UI explicitly says there are no tickets
+                # Check if the UI explicitly says there are no tickets (substring match)
                 try:
-                    if page.locator("text='No hay entradas'").is_visible(timeout=2000):
+                    if page.locator("text=No hay entradas").is_visible(timeout=2000):
                         log.info("Page explicitly states 'No hay entradas'. Returning 0 matches.")
                         return []
                 except Exception:
