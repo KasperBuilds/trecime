@@ -208,20 +208,18 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
     extract the JSON, and close the browser.
     Returns: list of matches, or None on network/interception error.
     """
-    matches_data = None
+    raw_responses = []
 
     def on_response(response):
-        nonlocal matches_data
+        nonlocal raw_responses
         
         if response.request.resource_type in ("fetch", "xhr"):
-            log.info("XHR/Fetch: %s %s", response.status, response.url)
-            
             if "match" in response.url.lower() and response.request.method == "GET":
                 try:
                     data = response.json()
                     # Check if it looks like the matches data we expect
                     if isinstance(data, list) or "matches" in data or "data" in data or "items" in data:
-                        matches_data = data
+                        raw_responses.append(data)
                         log.info("Successfully intercepted matches JSON from %s", response.url)
                 except Exception:
                     pass
@@ -247,22 +245,30 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
             except PlaywrightTimeoutError:
                 pass
                 
-            # Wait up to 30 seconds for the API call to complete
-            for _ in range(30):
-                if matches_data is not None:
-                    break
-                page.wait_for_timeout(1000)
+            # Sweep through the upcoming months to force the site to load all tickets
+            months_to_check = ["Ago", "Sep", "Oct", "Nov", "Dic", "Ene", "Feb", "Mar", "Abr", "May"]
+            for m in months_to_check:
+                try:
+                    month_pill = page.locator(f"text='{m}'").first
+                    if month_pill.is_visible(timeout=1000):
+                        month_pill.click()
+                        page.wait_for_timeout(1500)  # Wait for the API to fetch
+                except Exception:
+                    pass
             
-            if matches_data is None:
+            # Give it a final 5 seconds to finish any pending requests
+            page.wait_for_timeout(5000)
+            
+            if not raw_responses:
                 # Check if the UI explicitly says there are no tickets (substring match)
                 try:
                     if page.locator("text=No hay entradas").is_visible(timeout=2000):
-                        log.info("Page explicitly states 'No hay entradas'. Returning 0 matches.")
+                        log.info("Page explicitly states 'No hay entradas' after sweeping. Returning 0 matches.")
                         return []
                 except Exception:
                     pass
 
-                log.warning("matches_data is still None. Taking debug screenshot...")
+                log.warning("No matches JSON intercepted. Taking debug screenshot...")
                 try:
                     page.screenshot(path="debug_rm.png")
                     requests.post(
@@ -273,16 +279,25 @@ def fetch_matches_with_playwright() -> Optional[list[dict]]:
                     )
                 except Exception as e:
                     log.error("Screenshot error: %s", e)
+                return None
 
         except Exception as e:
             log.warning("Playwright navigation error: %r", e)
+            return None
         finally:
             browser.close()
-
-    if matches_data is None:
-        return None  # Failed to intercept or load
-    
-    return parse_matches(matches_data)
+            
+    # Parse and deduplicate all collected matches
+    all_matches = []
+    seen_ids = set()
+    for raw in raw_responses:
+        parsed = parse_matches(raw)
+        for match in parsed:
+            if match["id"] not in seen_ids:
+                seen_ids.add(match["id"])
+                all_matches.append(match)
+                
+    return all_matches
 
 # ============================================================================
 # Transition detection
